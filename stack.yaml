@@ -1,0 +1,126 @@
+Resources:
+  CodeDeployApplication:
+    Type: "AWS::CodeDeploy::Application"
+    Properties:
+      ApplicationName: "my-codedeploy-application"
+  CodeDeployDeploymentGroup:
+    Type: "AWS::CodeDeploy::DeploymentGroup"
+    Properties:
+      ApplicationName: !Ref "CodeDeployApplication"
+      DeploymentGroupName: "my-codedeploy-deployment-group"
+      ServiceRoleArn: !GetAtt "CodeDeployIAMRole.Arn"
+      Ec2TagFilters:
+        - Type: "KEY_AND_VALUE"
+          Key: "CodeDeploy"
+          Value: "true"
+  CodeDeployElbAssociation:
+    Type: "Custom::CodeDeployElbAssociation"
+    Properties:
+      ServiceToken: !GetAtt "LambdaFunction.Arn"
+      CodeDeployApplicationName: !Ref "CodeDeployApplication"
+      CodeDeployDeploymentGroupName: !Ref "CodeDeployDeploymentGroup"
+      LoadBalancerName: !Ref "ElasticLoadBalancingLoadBalancer"
+  CodeDeployIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "my-codedeploy-service-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "codedeploy.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+  EC2Instance:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId: "ami-d7b9a2b1"
+      InstanceType: "t2.micro"
+      Tags:
+        - Key: "CodeDeploy"
+          Value: "true"
+  ElasticLoadBalancingLoadBalancer:
+    Type: "AWS::ElasticLoadBalancing::LoadBalancer"
+    Properties:
+      AvailabilityZones: !GetAZs ""
+      Listeners:
+        - InstancePort: 80
+          LoadBalancerPort: 80
+          Protocol: "HTTP"
+  LambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: "codedeploy-elb-association"
+      Handler: "index.handler"
+      Role: !GetAtt "LambdaIAMRole.Arn"
+      Runtime: "nodejs6.10"
+      Timeout: 10
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const response = require('cfn-response');
+          const codedeploy = new AWS.CodeDeploy();
+
+          exports.handler = (event, context) => {
+            console.log(event);
+
+            let codedeploy_application_name = event.ResourceProperties.CodeDeployApplicationName;
+            let codedeploy_deployment_group_name = event.ResourceProperties.CodeDeployDeploymentGroupName;
+
+            let params = {};
+            if(event.RequestType === 'Delete') {
+              params = {
+                applicationName: codedeploy_application_name,
+                currentDeploymentGroupName: codedeploy_deployment_group_name,
+                deploymentStyle: {
+                  deploymentOption: 'WITHOUT_TRAFFIC_CONTROL',
+                  deploymentType: 'IN_PLACE',
+                },
+              };
+            } else { // Create and Update
+              params = {
+                applicationName: codedeploy_application_name,
+                currentDeploymentGroupName: codedeploy_deployment_group_name,
+                deploymentStyle: {
+                  deploymentOption: 'WITH_TRAFFIC_CONTROL',
+                  deploymentType: 'IN_PLACE',
+                },
+                loadBalancerInfo: {
+                  elbInfoList: [
+                    {
+                      name: event.ResourceProperties.LoadBalancerName,
+                    }
+                  ],
+                },
+              };
+            }
+
+            console.log(params);
+            codedeploy.updateDeploymentGroup(params, function(err, data) {
+              console.log(err);
+              console.log(data);
+              if (err) {
+                  response.send(event, context, response.FAILED, err.stack);
+              } else {
+                  response.send(event, context, response.SUCCESS);
+              }
+            });
+          };
+  LambdaIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "my-lambda-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AWSCodeDeployFullAccess"
+        - "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
